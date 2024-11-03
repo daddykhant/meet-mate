@@ -1,24 +1,35 @@
 require("dotenv").config();
 const TelegramBot = require("node-telegram-bot-api");
 const express = require("express");
+
 const token = process.env.TELEGRAM_TOKEN;
 const bot = new TelegramBot(token);
 const app = express();
 app.use(express.json());
-// Set webhook
+
 const url = process.env.WEBHOOK_URL;
-bot.setWebHook(`${url}/bot${token}`);
+const chatPairs = {};
+const maleQueue = [];
+const femaleQueue = [];
+
+// Set webhook with error handling
+bot.setWebHook(`${url}/bot${token}`, {}, (err) => {
+  if (err) console.error("Error setting webhook:", err);
+  else console.log("Webhook set successfully!");
+});
 
 // Handle Telegram webhook requests
 app.post(`/bot${token}`, (req, res) => {
   bot.processUpdate(req.body);
   res.sendStatus(200);
 });
-// Simple start message
+
+// Start message
 bot.onText(/\/start/, (msg) => {
   const chatId = msg.chat.id;
   bot.sendMessage(chatId, "Welcome! To start chatting, use /male or /female.");
 });
+
 // Handle male and female commands
 bot.onText(/\/male/, (msg) => {
   const chatId = msg.chat.id;
@@ -30,51 +41,46 @@ bot.onText(/\/female/, (msg) => {
   addToQueue(chatId, "female");
 });
 
-// Add user to respective queue and match if possible
+// Add user to queue and match if possible
 function addToQueue(chatId, gender) {
   const userQueue = gender === "male" ? maleQueue : femaleQueue;
   const oppositeQueue = gender === "male" ? femaleQueue : maleQueue;
 
-  // Check if there's someone waiting in the opposite queue
   if (oppositeQueue.length > 0) {
     const partnerId = oppositeQueue.shift();
     createChatPair(chatId, partnerId);
   } else {
-    // Add user to their gender queue if no match is found
     userQueue.push(chatId);
-    bot.sendMessage(chatId, `Waiting for an anonymous match...`);
+    bot.sendMessage(chatId, "Waiting for an anonymous match...");
   }
 }
 
-// Create a chat pair
+// Create chat pair
 function createChatPair(user1, user2) {
   chatPairs[user1] = user2;
   chatPairs[user2] = user1;
 
-  bot.sendMessage(
-    user1,
-    "You've been matched with an anonymous user! Type your message to start chatting."
-  );
-  bot.sendMessage(
-    user2,
-    "You've been matched with an anonymous user! Type your message to start chatting."
-  );
+  bot.sendMessage(user1, "You've been matched! Start chatting.");
+  bot.sendMessage(user2, "You've been matched! Start chatting.");
 }
 
-// Handle messages between matched users
+// Message forwarding between matched users
 bot.on("message", (msg) => {
   const chatId = msg.chat.id;
 
-  // If user has a partner, forward the message
   if (chatPairs[chatId]) {
     const partnerId = chatPairs[chatId];
-    bot.sendMessage(partnerId, msg.text);
+    if (msg.text) {
+      bot.sendMessage(partnerId, msg.text);
+    } else {
+      bot.sendMessage(chatId, "Only text messages are supported.");
+    }
   } else {
     bot.sendMessage(chatId, "Type /male or /female to get matched.");
   }
 });
 
-// Handle end of conversation
+// End conversation
 bot.onText(/\/end/, (msg) => {
   const chatId = msg.chat.id;
   const partnerId = chatPairs[chatId];
@@ -89,7 +95,6 @@ bot.onText(/\/end/, (msg) => {
       "Your partner has left the chat. Type /male or /female to find a new partner."
     );
 
-    // Remove from chatPairs
     delete chatPairs[chatId];
     delete chatPairs[partnerId];
   } else {
@@ -97,7 +102,7 @@ bot.onText(/\/end/, (msg) => {
   }
 });
 
-// Clean up disconnected users from the queue
+// Cleanup disconnected users
 function cleanUpQueue() {
   const activeUsers = Object.keys(chatPairs);
   [maleQueue, femaleQueue].forEach((queue) => {
@@ -109,5 +114,8 @@ function cleanUpQueue() {
   });
 }
 
-console.log("Bot is running...");
-module.exports = app;
+// Server listener
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log(`Server is running on port ${PORT}`);
+});
