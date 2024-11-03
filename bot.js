@@ -7,16 +7,13 @@ const bot = new TelegramBot(token);
 const app = express();
 app.use(express.json());
 
-const url = process.env.WEBHOOK_URL;
-const chatPairs = {};
 const maleQueue = [];
 const femaleQueue = [];
+const chatPairs = {};
 
-// Set webhook with error handling
-bot.setWebHook(`${url}/bot${token}`, {}, (err) => {
-  if (err) console.error("Error setting webhook:", err);
-  else console.log("Webhook set successfully!");
-});
+// Set webhook
+const url = process.env.WEBHOOK_URL;
+bot.setWebHook(`${url}/bot${token}`);
 
 // Handle Telegram webhook requests
 app.post(`/bot${token}`, (req, res) => {
@@ -24,13 +21,13 @@ app.post(`/bot${token}`, (req, res) => {
   res.sendStatus(200);
 });
 
-// Start message
+// Start command to initiate chat matching
 bot.onText(/\/start/, (msg) => {
   const chatId = msg.chat.id;
   bot.sendMessage(chatId, "Welcome! To start chatting, use /male or /female.");
 });
 
-// Handle male and female commands
+// Handle male and female commands to join a queue for matching
 bot.onText(/\/male/, (msg) => {
   const chatId = msg.chat.id;
   addToQueue(chatId, "male");
@@ -41,46 +38,54 @@ bot.onText(/\/female/, (msg) => {
   addToQueue(chatId, "female");
 });
 
-// Add user to queue and match if possible
+// Add user to respective queue and match if possible
 function addToQueue(chatId, gender) {
   const userQueue = gender === "male" ? maleQueue : femaleQueue;
   const oppositeQueue = gender === "male" ? femaleQueue : maleQueue;
 
+  // Check if there's someone waiting in the opposite queue
   if (oppositeQueue.length > 0) {
     const partnerId = oppositeQueue.shift();
     createChatPair(chatId, partnerId);
   } else {
+    // Add user to their gender queue if no match is found
     userQueue.push(chatId);
-    bot.sendMessage(chatId, "Waiting for an anonymous match...");
+    bot.sendMessage(chatId, `Waiting for an anonymous match...`);
   }
 }
 
-// Create chat pair
+// Create a chat pair
 function createChatPair(user1, user2) {
   chatPairs[user1] = user2;
   chatPairs[user2] = user1;
 
-  bot.sendMessage(user1, "You've been matched! Start chatting.");
-  bot.sendMessage(user2, "You've been matched! Start chatting.");
+  bot.sendMessage(
+    user1,
+    "You've been matched with an anonymous user! Type your message to start chatting."
+  );
+  bot.sendMessage(
+    user2,
+    "You've been matched with an anonymous user! Type your message to start chatting."
+  );
 }
 
-// Message forwarding between matched users
+// Handle messages between matched users
 bot.on("message", (msg) => {
   const chatId = msg.chat.id;
 
+  // Check if the message is a command (ignore commands here)
+  if (msg.text.startsWith("/")) return;
+
+  // If the user has a partner, forward the message; otherwise, prompt to join a queue
   if (chatPairs[chatId]) {
     const partnerId = chatPairs[chatId];
-    if (msg.text) {
-      bot.sendMessage(partnerId, msg.text);
-    } else {
-      bot.sendMessage(chatId, "Only text messages are supported.");
-    }
+    bot.sendMessage(partnerId, msg.text);
   } else {
     bot.sendMessage(chatId, "Type /male or /female to get matched.");
   }
 });
 
-// End conversation
+// Handle end of conversation
 bot.onText(/\/end/, (msg) => {
   const chatId = msg.chat.id;
   const partnerId = chatPairs[chatId];
@@ -95,6 +100,7 @@ bot.onText(/\/end/, (msg) => {
       "Your partner has left the chat. Type /male or /female to find a new partner."
     );
 
+    // Remove from chatPairs
     delete chatPairs[chatId];
     delete chatPairs[partnerId];
   } else {
@@ -102,7 +108,7 @@ bot.onText(/\/end/, (msg) => {
   }
 });
 
-// Cleanup disconnected users
+// Clean up disconnected users from the queue periodically
 function cleanUpQueue() {
   const activeUsers = Object.keys(chatPairs);
   [maleQueue, femaleQueue].forEach((queue) => {
@@ -114,8 +120,5 @@ function cleanUpQueue() {
   });
 }
 
-// Server listener
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`Server is running on port ${PORT}`);
-});
+console.log("Bot is running...");
+module.exports = app;
