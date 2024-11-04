@@ -9,10 +9,10 @@ app.use(express.json());
 
 const url = process.env.WEBHOOK_URL;
 const chatPairs = {};
-const maleQueue = [];
-const femaleQueue = [];
+const maleQueue = new Map();
+const femaleQueue = new Map();
 
-// Asynchronously set webhook and catch any errors
+// Asynchronously set webhook
 (async () => {
   try {
     await bot.setWebHook(`${url}/bot${token}`);
@@ -23,9 +23,9 @@ const femaleQueue = [];
 })();
 
 // Handle Telegram webhook requests
-app.post(`/bot${token}`, (req, res) => {
+app.post(`/bot${token}`, async (req, res) => {
   try {
-    bot.processUpdate(req.body);
+    await bot.processUpdate(req.body);
     res.sendStatus(200);
   } catch (error) {
     console.error("Error processing update:", error);
@@ -36,26 +36,55 @@ app.post(`/bot${token}`, (req, res) => {
 // Start message
 bot.onText(/\/start/, (msg) => {
   const chatId = msg.chat.id;
-  bot.sendMessage(
-    chatId,
-    `Hello! I'm here to connect you anonymously with another user.
-    \nCommands:
-    - /male: Join the male queue to find a match.
-    - /female: Join the female queue to find a match.
-    - /end: End the current chat and start a new one if you'd like.`
-  );
+  sendMenu(chatId);
 });
 
-// Handle male and female commands
-bot.onText(/\/male/, (msg) => {
-  const chatId = msg.chat.id;
-  addToQueue(chatId, "male");
+// Function to send the menu
+function sendMenu(chatId) {
+  const menuOptions = {
+    reply_markup: {
+      inline_keyboard: [
+        [
+          { text: "Chat with male.", callback_data: "male" },
+          { text: "Chat with female.", callback_data: "female" },
+        ],
+        [{ text: "End Chat", callback_data: "end" }],
+      ],
+    },
+  };
+
+  bot.sendMessage(chatId, "Welcome! Choose an option:", menuOptions);
+}
+
+// Handle button presses
+bot.on("callback_query", (callbackQuery) => {
+  const chatId = callbackQuery.message.chat.id;
+  const action = callbackQuery.data;
+
+  switch (action) {
+    case "male":
+      addToQueue(chatId, "male");
+      break;
+    case "female":
+      addToQueue(chatId, "female");
+      break;
+    case "end":
+      endChat(chatId);
+      break;
+    default:
+      sendMenu(chatId);
+      break;
+  }
 });
 
-bot.onText(/\/female/, (msg) => {
-  const chatId = msg.chat.id;
-  addToQueue(chatId, "female");
-});
+// Utility function to send messages
+function sendMessage(chatId, text) {
+  bot
+    .sendMessage(chatId, text)
+    .catch((error) =>
+      console.error(`Error sending message to ${chatId}:`, error)
+    );
+}
 
 // Add user to queue and match if possible
 function addToQueue(chatId, gender) {
@@ -63,18 +92,18 @@ function addToQueue(chatId, gender) {
   const oppositeQueue = gender === "male" ? femaleQueue : maleQueue;
 
   // Prevent duplicate entries in the queue
-  if (userQueue.includes(chatId) || oppositeQueue.includes(chatId)) {
-    bot.sendMessage(chatId, "You're already in the queue! Please wait.");
-    return;
+  if (userQueue.has(chatId)) {
+    return sendMessage(chatId, "You're already in the queue! Please wait.");
   }
 
   // Try to match with someone from the opposite queue
-  if (oppositeQueue.length > 0) {
-    const partnerId = oppositeQueue.shift();
+  if (oppositeQueue.size > 0) {
+    const partnerId = [...oppositeQueue.keys()].shift();
+    oppositeQueue.delete(partnerId); // Remove matched partner from the opposite queue
     createChatPair(chatId, partnerId);
   } else {
-    userQueue.push(chatId);
-    bot.sendMessage(chatId, "💬 Looking for a match... Please wait a moment.");
+    userQueue.set(chatId, true); // Add to queue
+    sendMessage(chatId, "💬 Looking for a match... Please wait a moment.");
   }
 }
 
@@ -83,8 +112,33 @@ function createChatPair(user1, user2) {
   chatPairs[user1] = user2;
   chatPairs[user2] = user1;
 
-  bot.sendMessage(user1, "You've been matched! Start chatting.");
-  bot.sendMessage(user2, "You've been matched! Start chatting.");
+  sendMessage(user1, "You've been matched! Start chatting.");
+  sendMessage(user2, "You've been matched! Start chatting.");
+}
+
+// End chat function
+function endChat(chatId) {
+  const partnerId = chatPairs[chatId];
+
+  if (partnerId) {
+    sendMessage(
+      chatId,
+      "🚫 You've ended the chat. Use the menu to find a new chat partner anytime!"
+    );
+    sendMessage(
+      partnerId,
+      "🚫 Your partner has left the chat. Use the menu to find a new chat partner anytime!"
+    );
+
+    // Remove users from chat pairs
+    delete chatPairs[chatId];
+    delete chatPairs[partnerId];
+  } else {
+    sendMessage(
+      chatId,
+      "You are not currently in a chat. Use the menu to start a new chat."
+    );
+  }
 }
 
 // Forward messages between matched users
@@ -96,49 +150,11 @@ bot.on("message", (msg) => {
 
   if (chatPairs[chatId]) {
     const partnerId = chatPairs[chatId];
-    bot.sendMessage(partnerId, msg.text);
+    sendMessage(partnerId, msg.text);
   } else {
-    bot.sendMessage(chatId, "Type /male or /female to get matched.");
+    sendMessage(chatId, "Type /start to see the menu.");
   }
 });
-
-// End conversation
-bot.onText(/\/end/, (msg) => {
-  const chatId = msg.chat.id;
-  const partnerId = chatPairs[chatId];
-
-  if (partnerId) {
-    bot.sendMessage(
-      chatId,
-      "🚫 You've ended the chat. Use /male or /female to find a new chat partner anytime!"
-    );
-    bot.sendMessage(
-      partnerId,
-      "🚫 Your partner has left the chat. Use /male or /female to find a new chat partner anytime!"
-    );
-
-    // Remove users from chat pairs
-    delete chatPairs[chatId];
-    delete chatPairs[partnerId];
-  } else {
-    bot.sendMessage(
-      chatId,
-      "You are not currently in a chat. Type /male or /female to start a new chat."
-    );
-  }
-});
-
-// Cleanup disconnected users (optional)
-function cleanUpQueue() {
-  const activeUsers = new Set(Object.keys(chatPairs));
-  [maleQueue, femaleQueue].forEach((queue) => {
-    for (let i = queue.length - 1; i >= 0; i--) {
-      if (!activeUsers.has(queue[i])) {
-        queue.splice(i, 1);
-      }
-    }
-  });
-}
 
 // Server listener
 const PORT = process.env.PORT || 3000;
