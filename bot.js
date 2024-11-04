@@ -3,7 +3,7 @@ const TelegramBot = require("node-telegram-bot-api");
 const express = require("express");
 
 const token = process.env.TELEGRAM_TOKEN;
-const bot = new TelegramBot(token);
+const bot = new TelegramBot(token, { polling: false });
 const app = express();
 app.use(express.json());
 
@@ -20,8 +20,13 @@ bot.setWebHook(`${url}/bot${token}`, {}, (err) => {
 
 // Handle Telegram webhook requests
 app.post(`/bot${token}`, (req, res) => {
-  bot.processUpdate(req.body);
-  res.sendStatus(200);
+  try {
+    bot.processUpdate(req.body);
+    res.sendStatus(200);
+  } catch (error) {
+    console.error("Error processing update:", error);
+    res.sendStatus(500);
+  }
 });
 
 // Start message
@@ -56,7 +61,7 @@ function addToQueue(chatId, gender) {
   if (oppositeQueue.length > 0) {
     const partnerId = oppositeQueue.shift();
     createChatPair(chatId, partnerId);
-  } else {
+  } else if (!userQueue.includes(chatId)) {
     userQueue.push(chatId);
     bot.sendMessage(chatId, `💬 Looking for a match... Please wait a moment.`);
   }
@@ -76,7 +81,10 @@ function createChatPair(user1, user2) {
 //
 bot.on("message", (msg) => {
   const chatId = msg.chat.id;
+
+  // Ignore messages that are commands
   if (msg.text.startsWith("/")) return;
+
   if (chatPairs[chatId]) {
     const partnerId = chatPairs[chatId];
     bot.sendMessage(partnerId, msg.text);
