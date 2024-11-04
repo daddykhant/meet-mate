@@ -12,11 +12,15 @@ const chatPairs = {};
 const maleQueue = [];
 const femaleQueue = [];
 
-// Set webhook with error handling
-bot.setWebHook(`${url}/bot${token}`, {}, (err) => {
-  if (err) console.error("Error setting webhook:", err);
-  else console.log("Webhook set successfully!");
-});
+// Asynchronously set webhook and catch any errors
+(async () => {
+  try {
+    await bot.setWebHook(`${url}/bot${token}`);
+    console.log("Webhook set successfully!");
+  } catch (err) {
+    console.error("Error setting webhook:", err);
+  }
+})();
 
 // Handle Telegram webhook requests
 app.post(`/bot${token}`, (req, res) => {
@@ -58,12 +62,19 @@ function addToQueue(chatId, gender) {
   const userQueue = gender === "male" ? maleQueue : femaleQueue;
   const oppositeQueue = gender === "male" ? femaleQueue : maleQueue;
 
+  // Prevent duplicate entries in the queue
+  if (userQueue.includes(chatId) || oppositeQueue.includes(chatId)) {
+    bot.sendMessage(chatId, "You're already in the queue! Please wait.");
+    return;
+  }
+
+  // Try to match with someone from the opposite queue
   if (oppositeQueue.length > 0) {
     const partnerId = oppositeQueue.shift();
     createChatPair(chatId, partnerId);
-  } else if (!userQueue.includes(chatId)) {
+  } else {
     userQueue.push(chatId);
-    bot.sendMessage(chatId, `💬 Looking for a match... Please wait a moment.`);
+    bot.sendMessage(chatId, "💬 Looking for a match... Please wait a moment.");
   }
 }
 
@@ -76,14 +87,12 @@ function createChatPair(user1, user2) {
   bot.sendMessage(user2, "You've been matched! Start chatting.");
 }
 
-// Message forwarding between matched users
-
-//
+// Forward messages between matched users
 bot.on("message", (msg) => {
   const chatId = msg.chat.id;
 
-  // Ignore messages that are commands
-  if (msg.text.startsWith("/")) return;
+  // Ignore command messages
+  if (msg.text && msg.text.startsWith("/")) return;
 
   if (chatPairs[chatId]) {
     const partnerId = chatPairs[chatId];
@@ -103,12 +112,12 @@ bot.onText(/\/end/, (msg) => {
       chatId,
       "🚫 You've ended the chat. Use /male or /female to find a new chat partner anytime!"
     );
-
     bot.sendMessage(
       partnerId,
       "🚫 Your partner has left the chat. Use /male or /female to find a new chat partner anytime!"
     );
 
+    // Remove users from chat pairs
     delete chatPairs[chatId];
     delete chatPairs[partnerId];
   } else {
@@ -119,12 +128,12 @@ bot.onText(/\/end/, (msg) => {
   }
 });
 
-// Cleanup disconnected users
+// Cleanup disconnected users (optional)
 function cleanUpQueue() {
-  const activeUsers = Object.keys(chatPairs);
+  const activeUsers = new Set(Object.keys(chatPairs));
   [maleQueue, femaleQueue].forEach((queue) => {
     for (let i = queue.length - 1; i >= 0; i--) {
-      if (!activeUsers.includes(queue[i])) {
+      if (!activeUsers.has(queue[i])) {
         queue.splice(i, 1);
       }
     }
