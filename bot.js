@@ -9,15 +9,13 @@ const app = express();
 app.use(express.json());
 
 const url = process.env.WEBHOOK_URL;
-const redisUrl = process.env.REDIS_REST_URL; // Upstash REST URL
-const redisToken = process.env.REDIS_REST_TOKEN; // Upstash REST Token
+const redisUrl = process.env.REDIS_REST_URL;
+const redisToken = process.env.REDIS_REST_TOKEN;
 
-// Helper keys for Redis sets
 const MALE_QUEUE_KEY = "maleQueue";
 const FEMALE_QUEUE_KEY = "femaleQueue";
 const CHAT_PAIR_KEY = "chatPairs";
 
-// Asynchronously set webhook and catch any errors
 (async () => {
   try {
     await bot.setWebHook(`${url}/bot${token}`);
@@ -27,25 +25,30 @@ const CHAT_PAIR_KEY = "chatPairs";
   }
 })();
 
-// Redis helper function for Upstash REST API
 async function redisCommand(command, args = []) {
+  if (!redisUrl || !redisToken) {
+    console.error("Redis URL or token is missing from environment variables.");
+    return null;
+  }
+
   try {
-    const response = await axios.post(
-      `${redisUrl}/${command}/${args.join("/")}`,
-      {},
-      {
-        headers: {
-          Authorization: `Bearer ${redisToken}`,
-        },
-      }
-    );
+    // Construct the URL for Upstash REST API call
+    const url = `${redisUrl}/${command}/${args.join("/")}`;
+    console.log("Constructed URL:", url); // Debugging: log the constructed URL
+
+    // Send the command to Upstash
+    const response = await axios.get(url, {
+      headers: {
+        Authorization: `Bearer ${redisToken}`,
+      },
+    });
+
     return response.data.result;
   } catch (error) {
     console.error("Redis API error:", error);
   }
 }
 
-// Handle Telegram webhook requests
 app.post(`/bot${token}`, async (req, res) => {
   try {
     await bot.processUpdate(req.body);
@@ -56,7 +59,6 @@ app.post(`/bot${token}`, async (req, res) => {
   }
 });
 
-// Start message
 bot.onText(/\/start/, (msg) => {
   const chatId = msg.chat.id;
   bot.sendMessage(
@@ -69,7 +71,6 @@ Commands:
   );
 });
 
-// Handle male and female commands
 bot.onText(/\/male/, (msg) => {
   const chatId = msg.chat.id;
   addToQueue(chatId, "male");
@@ -80,26 +81,22 @@ bot.onText(/\/female/, (msg) => {
   addToQueue(chatId, "female");
 });
 
-// Add user to queue and match if possible
 async function addToQueue(chatId, gender) {
   const userQueueKey = gender === "male" ? MALE_QUEUE_KEY : FEMALE_QUEUE_KEY;
   const oppositeQueueKey =
     gender === "male" ? FEMALE_QUEUE_KEY : MALE_QUEUE_KEY;
 
-  // Check if user is already in a queue
   const isInQueue = await redisCommand("sismember", [userQueueKey, chatId]);
   const isInOppositeQueue = await redisCommand("sismember", [
     oppositeQueueKey,
     chatId,
   ]);
 
-  // Prevent duplicate entries in the queue
   if (isInQueue || isInOppositeQueue) {
     bot.sendMessage(chatId, "You're already in the queue! Please wait.");
     return;
   }
 
-  // Try to match with someone from the opposite queue
   const partnerId = await redisCommand("spop", [oppositeQueueKey]);
   if (partnerId) {
     await createChatPair(chatId, partnerId);
@@ -109,7 +106,6 @@ async function addToQueue(chatId, gender) {
   }
 }
 
-// Create chat pair
 async function createChatPair(user1, user2) {
   await redisCommand("hset", [CHAT_PAIR_KEY, user1, user2]);
   await redisCommand("hset", [CHAT_PAIR_KEY, user2, user1]);
@@ -120,11 +116,9 @@ async function createChatPair(user1, user2) {
   ]);
 }
 
-// Forward messages between matched users
 bot.on("message", async (msg) => {
   const chatId = msg.chat.id;
 
-  // Ignore command messages
   if (msg.text && msg.text.startsWith("/")) return;
 
   const partnerId = await redisCommand("hget", [CHAT_PAIR_KEY, chatId]);
@@ -139,7 +133,6 @@ bot.on("message", async (msg) => {
   }
 });
 
-// End conversation
 bot.onText(/\/end/, async (msg) => {
   const chatId = msg.chat.id;
   const partnerId = await redisCommand("hget", [CHAT_PAIR_KEY, chatId]);
@@ -165,7 +158,6 @@ bot.onText(/\/end/, async (msg) => {
   }
 });
 
-// Server listener
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Server is running on port ${PORT}`);
