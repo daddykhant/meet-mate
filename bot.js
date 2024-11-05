@@ -73,11 +73,13 @@ Commands:
 
 bot.onText(/\/male/, (msg) => {
   const chatId = msg.chat.id;
+
   addToQueue(chatId, "male");
 });
 
 bot.onText(/\/female/, (msg) => {
   const chatId = msg.chat.id;
+
   addToQueue(chatId, "female");
 });
 
