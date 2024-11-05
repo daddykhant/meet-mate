@@ -36,45 +36,25 @@ app.post(`/bot${token}`, async (req, res) => {
 // Start message
 bot.onText(/\/start/, (msg) => {
   const chatId = msg.chat.id;
-  sendMenu(chatId);
+  sendMessage(
+    chatId,
+    `Hello! I'm here to connect you anonymously with another user.
+    \nCommands:
+    - /male: Join the male queue to find a match.
+    - /female: Join the female queue to find a match.
+    - /end: End the current chat and start a new one if you'd like.`
+  );
 });
 
-// Function to send the menu
-function sendMenu(chatId) {
-  const menuOptions = {
-    reply_markup: {
-      inline_keyboard: [
-        [
-          { text: "Chat with male.", callback_data: "male" },
-          { text: "Chat with female.", callback_data: "female" },
-        ],
-        [{ text: "End Chat", callback_data: "end" }],
-      ],
-    },
-  };
+// Handle male and female commands
+bot.onText(/\/male/, (msg) => {
+  const chatId = msg.chat.id;
+  addToQueue(chatId, "male");
+});
 
-  bot.sendMessage(chatId, "Welcome! Choose an option:", menuOptions);
-}
-
-// Handle button presses
-bot.on("callback_query", (callbackQuery) => {
-  const chatId = callbackQuery.message.chat.id;
-  const action = callbackQuery.data;
-
-  switch (action) {
-    case "male":
-      addToQueue(chatId, "male");
-      break;
-    case "female":
-      addToQueue(chatId, "female");
-      break;
-    case "end":
-      endChat(chatId);
-      break;
-    default:
-      sendMenu(chatId);
-      break;
-  }
+bot.onText(/\/female/, (msg) => {
+  const chatId = msg.chat.id;
+  addToQueue(chatId, "female");
 });
 
 // Utility function to send messages
@@ -116,31 +96,6 @@ function createChatPair(user1, user2) {
   sendMessage(user2, "You've been matched! Start chatting.");
 }
 
-// End chat function
-function endChat(chatId) {
-  const partnerId = chatPairs[chatId];
-
-  if (partnerId) {
-    sendMessage(
-      chatId,
-      "🚫 You've ended the chat. Use the menu to find a new chat partner anytime!"
-    );
-    sendMessage(
-      partnerId,
-      "🚫 Your partner has left the chat. Use the menu to find a new chat partner anytime!"
-    );
-
-    // Remove users from chat pairs
-    delete chatPairs[chatId];
-    delete chatPairs[partnerId];
-  } else {
-    sendMessage(
-      chatId,
-      "You are not currently in a chat. Use the menu to start a new chat."
-    );
-  }
-}
-
 // Forward messages between matched users
 bot.on("message", (msg) => {
   const chatId = msg.chat.id;
@@ -152,9 +107,50 @@ bot.on("message", (msg) => {
     const partnerId = chatPairs[chatId];
     sendMessage(partnerId, msg.text);
   } else {
-    sendMessage(chatId, "Type /start to see the menu.");
+    sendMessage(chatId, "Type /male or /female to get matched.");
   }
 });
+
+// End conversation
+bot.onText(/\/end/, (msg) => {
+  const chatId = msg.chat.id;
+  const partnerId = chatPairs[chatId];
+
+  if (partnerId) {
+    sendMessage(
+      chatId,
+      "🚫 You've ended the chat. Use /male or /female to find a new chat partner anytime!"
+    );
+    sendMessage(
+      partnerId,
+      "🚫 Your partner has left the chat. Use /male or /female to find a new chat partner anytime!"
+    );
+
+    // Remove users from chat pairs
+    delete chatPairs[chatId];
+    delete chatPairs[partnerId];
+  } else {
+    sendMessage(
+      chatId,
+      "You are not currently in a chat. Type /male or /female to start a new chat."
+    );
+  }
+});
+
+// Cleanup disconnected users (optional)
+function cleanUpQueue() {
+  const activeUsers = new Set(Object.keys(chatPairs));
+  [maleQueue, femaleQueue].forEach((queue) => {
+    for (const userId of queue.keys()) {
+      if (!activeUsers.has(userId)) {
+        queue.delete(userId);
+      }
+    }
+  });
+}
+
+// Regular cleanup to be run every 5 minutes
+setInterval(cleanUpQueue, 5 * 60 * 1000); // 5 minutes in milliseconds
 
 // Server listener
 const PORT = process.env.PORT || 3000;
