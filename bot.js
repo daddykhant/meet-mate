@@ -1,7 +1,7 @@
 require("dotenv").config();
 const TelegramBot = require("node-telegram-bot-api");
 const express = require("express");
-const { createClient } = require("redis");
+const axios = require("axios");
 
 const token = process.env.TELEGRAM_TOKEN;
 const bot = new TelegramBot(token, { polling: false });
@@ -9,13 +9,8 @@ const app = express();
 app.use(express.json());
 
 const url = process.env.WEBHOOK_URL;
-
-// Initialize Redis client
-const redisClient = createClient();
-redisClient.connect().catch(console.error);
-
-redisClient.on("connect", () => console.log("Connected to Redis"));
-redisClient.on("error", (err) => console.error("Redis connection error:", err));
+const redisUrl = process.env.REDIS_REST_URL; // Upstash REST URL
+const redisToken = process.env.REDIS_REST_TOKEN; // Upstash REST Token
 
 // Helper keys for Redis sets
 const MALE_QUEUE_KEY = "maleQueue";
@@ -31,6 +26,24 @@ const CHAT_PAIR_KEY = "chatPairs";
     console.error("Error setting webhook:", err);
   }
 })();
+
+// Redis helper function for Upstash REST API
+async function redisCommand(command, args = []) {
+  try {
+    const response = await axios.post(
+      `${redisUrl}/${command}/${args.join("/")}`,
+      {},
+      {
+        headers: {
+          Authorization: `Bearer ${redisToken}`,
+        },
+      }
+    );
+    return response.data.result;
+  } catch (error) {
+    console.error("Redis API error:", error);
+  }
+}
 
 // Handle Telegram webhook requests
 app.post(`/bot${token}`, async (req, res) => {
@@ -73,11 +86,12 @@ async function addToQueue(chatId, gender) {
   const oppositeQueueKey =
     gender === "male" ? FEMALE_QUEUE_KEY : MALE_QUEUE_KEY;
 
-  const isInQueue = await redisClient.sIsMember(userQueueKey, chatId);
-  const isInOppositeQueue = await redisClient.sIsMember(
+  // Check if user is already in a queue
+  const isInQueue = await redisCommand("sismember", [userQueueKey, chatId]);
+  const isInOppositeQueue = await redisCommand("sismember", [
     oppositeQueueKey,
-    chatId
-  );
+    chatId,
+  ]);
 
   // Prevent duplicate entries in the queue
   if (isInQueue || isInOppositeQueue) {
@@ -86,21 +100,20 @@ async function addToQueue(chatId, gender) {
   }
 
   // Try to match with someone from the opposite queue
-  const partnerId = await redisClient.sPop(oppositeQueueKey);
+  const partnerId = await redisCommand("spop", [oppositeQueueKey]);
   if (partnerId) {
     await createChatPair(chatId, partnerId);
   } else {
-    await redisClient.sAdd(userQueueKey, chatId);
+    await redisCommand("sadd", [userQueueKey, chatId]);
     bot.sendMessage(chatId, "💬 Looking for a match... Please wait a moment.");
   }
 }
 
 // Create chat pair
 async function createChatPair(user1, user2) {
-  await redisClient.hSet(CHAT_PAIR_KEY, user1, user2);
-  await redisClient.hSet(CHAT_PAIR_KEY, user2, user1);
+  await redisCommand("hset", [CHAT_PAIR_KEY, user1, user2]);
+  await redisCommand("hset", [CHAT_PAIR_KEY, user2, user1]);
 
-  // Send messages in parallel for quicker delivery
   await Promise.all([
     bot.sendMessage(user1, "You've been matched! Start chatting."),
     bot.sendMessage(user2, "You've been matched! Start chatting."),
@@ -114,7 +127,7 @@ bot.on("message", async (msg) => {
   // Ignore command messages
   if (msg.text && msg.text.startsWith("/")) return;
 
-  const partnerId = await redisClient.hGet(CHAT_PAIR_KEY, chatId);
+  const partnerId = await redisCommand("hget", [CHAT_PAIR_KEY, chatId]);
   if (partnerId) {
     bot
       .sendMessage(partnerId, msg.text)
@@ -129,10 +142,9 @@ bot.on("message", async (msg) => {
 // End conversation
 bot.onText(/\/end/, async (msg) => {
   const chatId = msg.chat.id;
-  const partnerId = await redisClient.hGet(CHAT_PAIR_KEY, chatId);
+  const partnerId = await redisCommand("hget", [CHAT_PAIR_KEY, chatId]);
 
   if (partnerId) {
-    // Notify both users of chat ending in parallel
     await Promise.all([
       bot.sendMessage(
         chatId,
@@ -144,15 +156,14 @@ bot.onText(/\/end/, async (msg) => {
       ),
     ]);
 
-    // Remove both users from chat pairs
-    await redisClient.hDel(CHAT_PAIR_KEY, chatId, partnerId);
+    await redisCommand("hdel", [CHAT_PAIR_KEY, chatId, partnerId]);
   } else {
     bot.sendMessage(
       chatId,
       "You are not currently in a chat. Type /male or /female to start a new chat."
     );
   }
-}); // Add this closing parenthesis and semicolon
+});
 
 // Server listener
 const PORT = process.env.PORT || 3000;
