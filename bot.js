@@ -1,6 +1,7 @@
 require("dotenv").config();
 const TelegramBot = require("node-telegram-bot-api");
 const express = require("express");
+const { createClient } = require("redis");
 
 const token = process.env.TELEGRAM_TOKEN;
 const bot = new TelegramBot(token, { polling: false });
@@ -8,11 +9,20 @@ const app = express();
 app.use(express.json());
 
 const url = process.env.WEBHOOK_URL;
-const chatPairs = {};
-const maleQueue = new Map();
-const femaleQueue = new Map();
 
-// Asynchronously set webhook
+// Initialize Redis client
+const redisClient = createClient();
+redisClient.connect().catch(console.error);
+
+redisClient.on("connect", () => console.log("Connected to Redis"));
+redisClient.on("error", (err) => console.error("Redis connection error:", err));
+
+// Helper keys for Redis sets
+const MALE_QUEUE_KEY = "maleQueue";
+const FEMALE_QUEUE_KEY = "femaleQueue";
+const CHAT_PAIR_KEY = "chatPairs";
+
+// Asynchronously set webhook and catch any errors
 (async () => {
   try {
     await bot.setWebHook(`${url}/bot${token}`);
@@ -36,13 +46,13 @@ app.post(`/bot${token}`, async (req, res) => {
 // Start message
 bot.onText(/\/start/, (msg) => {
   const chatId = msg.chat.id;
-  sendMessage(
+  bot.sendMessage(
     chatId,
     `Hello! I'm here to connect you anonymously with another user.
-    \nCommands:
-    - /male: Join the male queue to find a match.
-    - /female: Join the female queue to find a match.
-    - /end: End the current chat and start a new one if you'd like.`
+Commands:
+- /male: Join the male queue to find a match.
+- /female: Join the female queue to find a match.
+- /end: End the current chat and start a new one if you'd like.`
   );
 });
 
@@ -57,100 +67,92 @@ bot.onText(/\/female/, (msg) => {
   addToQueue(chatId, "female");
 });
 
-// Utility function to send messages
-function sendMessage(chatId, text) {
-  bot
-    .sendMessage(chatId, text)
-    .catch((error) =>
-      console.error(`Error sending message to ${chatId}:`, error)
-    );
-}
-
 // Add user to queue and match if possible
-function addToQueue(chatId, gender) {
-  const userQueue = gender === "male" ? maleQueue : femaleQueue;
-  const oppositeQueue = gender === "male" ? femaleQueue : maleQueue;
+async function addToQueue(chatId, gender) {
+  const userQueueKey = gender === "male" ? MALE_QUEUE_KEY : FEMALE_QUEUE_KEY;
+  const oppositeQueueKey =
+    gender === "male" ? FEMALE_QUEUE_KEY : MALE_QUEUE_KEY;
+
+  const isInQueue = await redisClient.sIsMember(userQueueKey, chatId);
+  const isInOppositeQueue = await redisClient.sIsMember(
+    oppositeQueueKey,
+    chatId
+  );
 
   // Prevent duplicate entries in the queue
-  if (userQueue.has(chatId)) {
-    return sendMessage(chatId, "You're already in the queue! Please wait.");
+  if (isInQueue || isInOppositeQueue) {
+    bot.sendMessage(chatId, "You're already in the queue! Please wait.");
+    return;
   }
 
   // Try to match with someone from the opposite queue
-  if (oppositeQueue.size > 0) {
-    const partnerId = [...oppositeQueue.keys()].shift();
-    oppositeQueue.delete(partnerId); // Remove matched partner from the opposite queue
-    createChatPair(chatId, partnerId);
+  const partnerId = await redisClient.sPop(oppositeQueueKey);
+  if (partnerId) {
+    await createChatPair(chatId, partnerId);
   } else {
-    userQueue.set(chatId, true); // Add to queue
-    sendMessage(chatId, "💬 Looking for a match... Please wait a moment.");
+    await redisClient.sAdd(userQueueKey, chatId);
+    bot.sendMessage(chatId, "💬 Looking for a match... Please wait a moment.");
   }
 }
 
 // Create chat pair
-function createChatPair(user1, user2) {
-  chatPairs[user1] = user2;
-  chatPairs[user2] = user1;
+async function createChatPair(user1, user2) {
+  await redisClient.hSet(CHAT_PAIR_KEY, user1, user2);
+  await redisClient.hSet(CHAT_PAIR_KEY, user2, user1);
 
-  sendMessage(user1, "You've been matched! Start chatting.");
-  sendMessage(user2, "You've been matched! Start chatting.");
+  // Send messages in parallel for quicker delivery
+  await Promise.all([
+    bot.sendMessage(user1, "You've been matched! Start chatting."),
+    bot.sendMessage(user2, "You've been matched! Start chatting."),
+  ]);
 }
 
 // Forward messages between matched users
-bot.on("message", (msg) => {
+bot.on("message", async (msg) => {
   const chatId = msg.chat.id;
 
   // Ignore command messages
   if (msg.text && msg.text.startsWith("/")) return;
 
-  if (chatPairs[chatId]) {
-    const partnerId = chatPairs[chatId];
-    sendMessage(partnerId, msg.text);
+  const partnerId = await redisClient.hGet(CHAT_PAIR_KEY, chatId);
+  if (partnerId) {
+    bot
+      .sendMessage(partnerId, msg.text)
+      .catch((error) =>
+        console.error(`Error forwarding message to ${partnerId}:`, error)
+      );
   } else {
-    sendMessage(chatId, "Type /male or /female to get matched.");
+    bot.sendMessage(chatId, "Type /male or /female to get matched.");
   }
 });
 
 // End conversation
-bot.onText(/\/end/, (msg) => {
+bot.onText(/\/end/, async (msg) => {
   const chatId = msg.chat.id;
-  const partnerId = chatPairs[chatId];
+  const partnerId = await redisClient.hGet(CHAT_PAIR_KEY, chatId);
 
   if (partnerId) {
-    sendMessage(
-      chatId,
-      "🚫 You've ended the chat. Use /male or /female to find a new chat partner anytime!"
-    );
-    sendMessage(
-      partnerId,
-      "🚫 Your partner has left the chat. Use /male or /female to find a new chat partner anytime!"
-    );
+    // Notify both users of chat ending in parallel
+    await Promise.all([
+      bot.sendMessage(
+        chatId,
+        "🚫 You've ended the chat. Use /male or /female to find a new chat partner anytime!"
+      ),
+      bot.sendMessage(
+        partnerId,
+        "🚫 Your partner has left the chat. Use /male or /female to find a new chat partner anytime!"
+      ),
+    ]);
 
-    // Remove users from chat pairs
-    delete chatPairs[chatId];
-    delete chatPairs[partnerId];
+    // Remove both users from chat pairs
+    await redisClient.hDel(CHAT_PAIR_KEY, chatId, partnerId);
   } else {
-    sendMessage(
+    bot.sendMessage(
       chatId,
       "You are not currently in a chat. Type /male or /female to start a new chat."
     );
   }
-});
-
-// Cleanup disconnected users (optional)
-function cleanUpQueue() {
-  const activeUsers = new Set(Object.keys(chatPairs));
-  [maleQueue, femaleQueue].forEach((queue) => {
-    for (const userId of queue.keys()) {
-      if (!activeUsers.has(userId)) {
-        queue.delete(userId);
-      }
-    }
-  });
-}
-
-// Regular cleanup to be run every 5 minutes
-setInterval(cleanUpQueue, 5 * 60 * 1000); // 5 minutes in milliseconds
+}); // Add this closing parenthesis and semicolon
 
 // Server listener
 const PORT = process.env.PORT || 3000;
