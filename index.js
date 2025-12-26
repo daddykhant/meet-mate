@@ -71,12 +71,12 @@ function sendMenu(chatId) {
                     { text: "Chat with female", callback_data: "female" },
                 ],
                 [{ text: "End Chat", callback_data: "end" }],
-                [{ text: "Active Users / Stats", callback_data: "stats" }],
             ],
         },
     };
-    sendMessage(chatId, "Welcome! Choose an option:", menuOptions);
+    bot.sendMessage(chatId, "Welcome! Choose an option:", menuOptions);
 }
+
 
 // ========================== QUEUE & CHAT LOGIC ==========================
 function addToQueue(chatId, gender) {
