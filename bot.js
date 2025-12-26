@@ -2,166 +2,225 @@ require("dotenv").config();
 const TelegramBot = require("node-telegram-bot-api");
 const express = require("express");
 
+// ========================== CONFIG ==========================
 const token = process.env.TELEGRAM_TOKEN;
-if (!token) {
-  console.error("Telegram token not found. Check your .env file.");
-  process.exit(1);
+const url = process.env.WEBHOOK_URL;
+const PORT = process.env.PORT || 3000;
+const ADMIN_ID = 1625397184;
+
+if (!token || !url) {
+    console.error("TELEGRAM_TOKEN or WEBHOOK_URL not found in .env");
+    process.exit(1);
 }
-const bot = new TelegramBot(token);
+
+// ========================== INIT BOT & SERVER ==========================
+const bot = new TelegramBot(token, { polling: false });
 const app = express();
 app.use(express.json());
 
-const url = process.env.WEBHOOK_URL;
-if (!url) {
-  console.error("Webhook URL not found. Check your .env file.");
-  process.exit(1);
-}
-const chatPairs = {};
+// ========================== IN-MEMORY STORAGE ==========================
+const chatPairs = {}; // chatId => partnerId
 const maleQueue = new Map();
 const femaleQueue = new Map();
+const bannedUsers = new Map(); // chatId => { reason, bannedAt }
+const badWords = ["badword1", "badword2", "badword3"]; // add your bad words here
 
-// Set webhook asynchronously
-(async () => {
-  try {
-    await bot.setWebHook(`${url}/bot${token}`);
-    console.log("Webhook set successfully!");
-  } catch (err) {
-    console.error("Error setting webhook:", err);
-  }
+// ========================== WEBHOOK SETUP ==========================
+(async() => {
+    try {
+        await bot.setWebHook(`${url}/bot${token}`);
+        console.log("Webhook set successfully!");
+    } catch (err) {
+        console.error("Error setting webhook:", err);
+        process.exit(1);
+    }
 })();
 
-// Handle Telegram webhook requests
-app.post(`/bot${token}`, async (req, res) => {
-  try {
-    await bot.processUpdate(req.body);
-    res.sendStatus(200);
-  } catch (error) {
-    console.error("Error processing update:", error);
-    res.sendStatus(500);
-  }
+app.post(`/bot${token}`, async(req, res) => {
+    try {
+        await bot.processUpdate(req.body);
+        res.sendStatus(200);
+    } catch (error) {
+        console.error("Error processing update:", error);
+        res.sendStatus(500);
+    }
 });
 
-// Start message
-bot.onText(/\/start/, (msg) => {
-  const chatId = msg.chat.id;
-  sendMenu(chatId);
-});
-
-// Function to send the menu
-function sendMenu(chatId) {
-  const menuOptions = {
-    reply_markup: {
-      inline_keyboard: [
-        [
-          { text: "Chat with male", callback_data: "male" },
-          { text: "Chat with female", callback_data: "female" },
-        ],
-        [{ text: "End Chat", callback_data: "end" }],
-      ],
-    },
-  };
-
-  bot.sendMessage(chatId, "Welcome! Choose an option:", menuOptions);
-}
-
-// Handle button presses
-bot.on("callback_query", (callbackQuery) => {
-  const chatId = callbackQuery.message.chat.id;
-  const action = callbackQuery.data;
-
-  switch (action) {
-    case "male":
-      addToQueue(chatId, "male");
-      break;
-    case "female":
-      addToQueue(chatId, "female");
-      break;
-    case "end":
-      endChat(chatId);
-      break;
-    default:
-      sendMenu(chatId);
-      break;
-  }
-});
-
-// Utility function to send messages
+// ========================== UTIL FUNCTIONS ==========================
 function sendMessage(chatId, text) {
-  bot
-    .sendMessage(chatId, text)
-    .catch((error) =>
-      console.error(`Error sending message to ${chatId}:`, error)
-    );
+    bot.sendMessage(chatId, text).catch((err) => console.error(`Error sending to ${chatId}:`, err));
 }
 
-// Add user to queue and match if possible
+function isBanned(chatId) {
+    return bannedUsers.has(chatId);
+}
+
+function containsBadWords(text) {
+    if (!text) return false;
+    const lower = text.toLowerCase();
+    return badWords.some((word) => lower.includes(word));
+}
+
+// ========================== MENU ==========================
+function sendMenu(chatId) {
+    const menuOptions = {
+        reply_markup: {
+            inline_keyboard: [
+                [
+                    { text: "Chat with male", callback_data: "male" },
+                    { text: "Chat with female", callback_data: "female" },
+                ],
+                [{ text: "End Chat", callback_data: "end" }],
+                [{ text: "Active Users / Stats", callback_data: "stats" }],
+            ],
+        },
+    };
+    sendMessage(chatId, "Welcome! Choose an option:", menuOptions);
+}
+
+// ========================== QUEUE & CHAT LOGIC ==========================
 function addToQueue(chatId, gender) {
-  const userQueue = gender === "male" ? maleQueue : femaleQueue;
-  const oppositeQueue = gender === "male" ? femaleQueue : maleQueue;
+    if (isBanned(chatId)) return sendMessage(chatId, "🚫 You are banned from this bot.");
 
-  if (userQueue.has(chatId)) {
-    return sendMessage(chatId, "You're already in the queue! Please wait.");
-  }
+    const userQueue = gender === "male" ? maleQueue : femaleQueue;
+    const oppositeQueue = gender === "male" ? femaleQueue : maleQueue;
 
-  if (oppositeQueue.size > 0) {
-    const partnerId = [...oppositeQueue.keys()].shift();
-    oppositeQueue.delete(partnerId);
-    createChatPair(chatId, partnerId);
-  } else {
-    userQueue.set(chatId, true);
-    sendMessage(chatId, "💬 Looking for a match... Please wait a moment.");
-  }
+    if (userQueue.has(chatId) || chatPairs[chatId]) {
+        return sendMessage(chatId, "You're already in a chat or queue. Please wait.");
+    }
+
+    if (oppositeQueue.size > 0) {
+        const partnerId = [...oppositeQueue.keys()][0];
+        oppositeQueue.delete(partnerId);
+        createChatPair(chatId, partnerId);
+    } else {
+        userQueue.set(chatId, true);
+        sendMessage(chatId, "💬 Looking for a match... Please wait.");
+    }
 }
 
-// Create chat pair
 function createChatPair(user1, user2) {
-  chatPairs[user1] = user2;
-  chatPairs[user2] = user1;
+    chatPairs[user1] = user2;
+    chatPairs[user2] = user1;
 
-  sendMessage(user1, "You've been matched! Start chatting.");
-  sendMessage(user2, "You've been matched! Start chatting.");
+    sendMessage(user1, "🎉 You've been matched! Start chatting.");
+    sendMessage(user2, "🎉 You've been matched! Start chatting.");
 }
 
-// End chat function
 function endChat(chatId) {
-  const partnerId = chatPairs[chatId];
+    const partnerId = chatPairs[chatId];
 
-  if (partnerId) {
-    sendMessage(
-      chatId,
-      "🚫 You've ended the chat. Use the menu to find a new chat partner anytime!"
-    );
-    sendMessage(
-      partnerId,
-      "🚫 Your partner has left the chat. Use the menu to find a new chat partner anytime!"
-    );
-
-    delete chatPairs[chatId];
-    delete chatPairs[partnerId];
-  } else {
-    sendMessage(
-      chatId,
-      "You are not currently in a chat. Use the menu to start a new chat."
-    );
-  }
+    if (partnerId) {
+        sendMessage(chatId, "🚫 You've ended the chat.");
+        sendMessage(partnerId, "🚫 Your partner has left the chat.");
+        delete chatPairs[chatId];
+        delete chatPairs[partnerId];
+    } else {
+        maleQueue.delete(chatId);
+        femaleQueue.delete(chatId);
+        sendMessage(chatId, "You are not currently in a chat. Use the menu to start a new chat.");
+    }
 }
 
-// Forward messages between matched users
+// ========================== CALLBACK HANDLER ==========================
+bot.on("callback_query", (query) => {
+    const chatId = query.message.chat.id;
+    const action = query.data;
+
+    if (isBanned(chatId)) {
+        bot.answerCallbackQuery(query.id, { text: "🚫 You are banned.", show_alert: true });
+        return;
+    }
+
+    switch (action) {
+        case "male":
+        case "female":
+            addToQueue(chatId, action);
+            break;
+        case "end":
+            endChat(chatId);
+            break;
+        case "stats":
+            if (chatId !== ADMIN_ID) return;
+            const maleCount = maleQueue.size;
+            const femaleCount = femaleQueue.size;
+            const activeChats = Object.keys(chatPairs).length / 2;
+            sendMessage(ADMIN_ID, `📊 Stats:\nActive chats: ${activeChats}\nMale queue: ${maleCount}\nFemale queue: ${femaleCount}\nTotal users: ${maleCount + femaleCount + activeChats*2}`);
+            break;
+        default:
+            sendMenu(chatId);
+    }
+    bot.answerCallbackQuery(query.id);
+});
+
+// ========================== MESSAGE FORWARDING ==========================
 bot.on("message", (msg) => {
-  const chatId = msg.chat.id;
+    const chatId = msg.chat.id;
 
-  if (msg.text && msg.text.startsWith("/")) return;
+    if (msg.text && msg.text.startsWith("/")) return; // skip commands
 
-  if (chatPairs[chatId]) {
-    const partnerId = chatPairs[chatId];
-    sendMessage(partnerId, msg.text);
-  } else {
-    sendMessage(chatId, "Type /start to see the menu.");
-  }
+    if (isBanned(chatId)) return sendMessage(chatId, "🚫 You are banned from this bot.");
+    if (containsBadWords(msg.text)) return sendMessage(chatId, "⚠️ Your message contains inappropriate words and was blocked.");
+
+    if (chatPairs[chatId]) {
+        sendMessage(chatPairs[chatId], msg.text);
+    } else {
+        sendMessage(chatId, "Type /start to see the menu.");
+    }
 });
 
-// Server listener
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`Server is running on port ${PORT}`);
+// ========================== START COMMAND ==========================
+bot.onText(/\/start/, (msg) => {
+    const chatId = msg.chat.id;
+    if (isBanned(chatId)) return sendMessage(chatId, "🚫 You are banned from this bot.");
+    sendMenu(chatId);
 });
+
+// ========================== ADMIN COMMANDS ==========================
+bot.onText(/\/ban (\d+) ?(.*)?/, (msg, match) => {
+    if (msg.from.id !== ADMIN_ID) return;
+
+    const userId = Number(match[1]);
+    const reason = match[2] || "No reason provided";
+
+    bannedUsers.set(userId, { reason, bannedAt: new Date() });
+    endChat(userId);
+    maleQueue.delete(userId);
+    femaleQueue.delete(userId);
+
+    sendMessage(userId, `🚫 You have been banned.\nReason: ${reason}`);
+    sendMessage(ADMIN_ID, `✅ User ${userId} banned. Reason: ${reason}`);
+});
+
+bot.onText(/\/unban (\d+)/, (msg, match) => {
+    if (msg.from.id !== ADMIN_ID) return;
+
+    const userId = Number(match[1]);
+    bannedUsers.delete(userId);
+    sendMessage(ADMIN_ID, `✅ User ${userId} unbanned.`);
+});
+
+bot.onText(/\/monitor/, (msg) => {
+    if (msg.from.id !== ADMIN_ID) return;
+
+    if (Object.keys(chatPairs).length === 0) return sendMessage(ADMIN_ID, "No active chats.");
+
+    let report = "📊 Active Chats:\n";
+    const seen = new Set();
+    for (const [user1, user2] of Object.entries(chatPairs)) {
+        if (seen.has(user1)) continue;
+        report += `• ${user1} ↔ ${user2}\n`;
+        seen.add(user1);
+        seen.add(user2);
+    }
+    sendMessage(ADMIN_ID, report);
+});
+
+bot.onText(/\/users/, (msg) => {
+    if (msg.from.id !== ADMIN_ID) return;
+
+    sendMessage(ADMIN_ID, `👥 Queues:\nMale: ${[...maleQueue.keys()].join(", ") || "None"}\nFemale: ${[...femaleQueue.keys()].join(", ") || "None"}`);
+});
+
+// ========================== START SERVER ==========================
+app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
