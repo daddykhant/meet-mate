@@ -26,7 +26,7 @@ const bannedUsers = new Map(); // chatId -> { reason, date }
 const searchTimeouts = new Map(); // chatId -> timeoutId
 const users = new Map(); // chatId -> { username, firstName }
 
-const badWords = ["badword1", "badword2", "badword3"];
+const badWords = ["Lee", "lee", "kmkl", "Kmkl", "mmsp", "loe"];
 
 // ========================== WEBHOOK ==========================
 app.post(`/bot${TOKEN}`, async(req, res) => {
@@ -164,6 +164,11 @@ bot.on("callback_query", async(q) => {
 });
 
 // ========================== MESSAGE HANDLER ==========================
+function containsBadWords(text = "") {
+    const lower = text.toLowerCase();
+    return badWords.some(w => lower.includes(w));
+}
+
 bot.on("message", (msg) => {
     const chatId = msg.chat.id;
     const text = msg.text;
@@ -171,7 +176,10 @@ bot.on("message", (msg) => {
     if (!text || text.startsWith("/")) return;
 
     if (isBanned(chatId)) return sendMessage(chatId, "🚫 You are banned.");
-    if (containsBadWords(text)) return sendMessage(chatId, "⚠️ Bad words are not allowed.");
+
+    // This is the warning
+    if (containsBadWords(text))
+        return sendMessage(chatId, "⚠️ Bad words are not allowed.");
 
     const partner = chatPairs[chatId];
     if (partner) {
@@ -180,6 +188,7 @@ bot.on("message", (msg) => {
         sendMessage(chatId, "Use the menu 👇");
     }
 });
+
 
 // ========================== START ==========================
 bot.onText(/\/start/, async(msg) => {
